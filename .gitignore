@@ -1,0 +1,8 @@
+.env
+__pycache__
+Data
+env
+faiss-data-store-code
+pinecon-data-store-code
+test-langchain-Agentic-RAG
+langchain-docs
