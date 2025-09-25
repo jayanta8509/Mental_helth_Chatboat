@@ -385,7 +385,8 @@ def get_response(message: str, user_id: str, use_agent: bool = False) -> Dict[st
             "mode": "agent" if use_agent else "counselor",
             "crisis_detected": False,
             "data_source": "none",
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "status_code": 200
         }
         
         # Check for crisis
@@ -428,6 +429,7 @@ def get_response(message: str, user_id: str, use_agent: bool = False) -> Dict[st
             print(f"Error in conversation stream: {stream_error}")
             response_data["response"] = "I'm experiencing some technical difficulties. Please try again or rephrase your question."
             response_data["data_source"] = "none"
+            response_data["status_code"] = 500
             return response_data
         
         # Analyze data sources from tool messages
@@ -471,7 +473,8 @@ def get_response(message: str, user_id: str, use_agent: bool = False) -> Dict[st
             "mode": "error",
             "crisis_detected": False,
             "data_source": "none",
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "status_code": 500
         }
 
 def chat_interactive(message: str, user_id: str, use_agent: bool = False):

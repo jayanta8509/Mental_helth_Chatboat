@@ -92,6 +92,7 @@ class ChatResponse(BaseModel):
     data_source: Optional[str] = Field(None, description="Data source used for retrieval (csv/pdf/both/none)")
     timestamp: float = Field(..., description="Unix timestamp of response")
     error: Optional[str] = Field(None, description="Error message if any")
+    status_code: int = Field(200, description="HTTP status code")
     
     model_config = {
         "json_schema_extra": {
@@ -103,7 +104,8 @@ class ChatResponse(BaseModel):
                 "crisis_detected": False,
                 "data_source": "csv",
                 "timestamp": 1640995200.0,
-                "error": None
+                "error": None,
+                "status_code": 200
             }
         }
     }
@@ -114,6 +116,7 @@ class HealthResponse(BaseModel):
     timestamp: float
     pinecone_connected: bool
     models_loaded: bool
+    status_code: int = Field(200, description="HTTP status code")
 
 class ConversationClearResponse(BaseModel):
     user_id: str
@@ -124,6 +127,7 @@ class ConversationSummaryResponse(BaseModel):
     user_id: str
     summary: str
     timestamp: float
+    status_code: int = Field(200, description="HTTP status code")
 
 
 # Health check endpoint
@@ -140,7 +144,8 @@ async def health_check():
             message="Mental Health RAG API is running",
             timestamp=datetime.now().timestamp(),
             pinecone_connected=system_initialized,
-            models_loaded=system_initialized
+            models_loaded=system_initialized,
+            status_code=200
         )
     except Exception as e:
         logger.error(f"Health check failed: {e}")
@@ -149,7 +154,8 @@ async def health_check():
             message=f"Health check failed: {str(e)}",
             timestamp=datetime.now().timestamp(),
             pinecone_connected=False,
-            models_loaded=False
+            models_loaded=False,
+            status_code=500
         )
 
 # Main chat endpoint
