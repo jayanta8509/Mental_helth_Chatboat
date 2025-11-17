@@ -12,6 +12,7 @@ Features:
 
 import os
 import time
+import asyncio
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -45,11 +46,50 @@ conversational_graph = None
 agent_executor = None
 memory_saver = None
 
+# Simple cache for storing recent queries and responses
+_query_cache = {}
+CACHE_TTL = 300  # 5 minutes
+CACHE_MAX_SIZE = 100
+
 # Crisis keywords for safety monitoring
 CRISIS_KEYWORDS = [
     "suicide", "kill myself", "end my life", "self-harm", "hurt myself",
     "want to die", "better off dead", "no point living", "ending it all"
 ]
+
+# Medicine-related keywords
+MEDICINE_KEYWORDS = [
+    "medicine", "medication", "drug", "pill", "tablet", "prescription",
+    "dosage", "side effects", "antidepressant", "anxiety medication",
+    "sleeping pills", "painkillers", "antipsychotic", "mood stabilizer"
+]
+
+def get_cache_key(query: str, user_id: str) -> str:
+    """Generate cache key for query"""
+    return f"{user_id}:{hash(query.lower().strip())}"
+
+def get_cached_response(query: str, user_id: str) -> Optional[Dict[str, Any]]:
+    """Get cached response if available and not expired"""
+    cache_key = get_cache_key(query, user_id)
+    if cache_key in _query_cache:
+        cached_data, timestamp = _query_cache[cache_key]
+        if time.time() - timestamp < CACHE_TTL:
+            return cached_data
+        else:
+            # Remove expired cache
+            del _query_cache[cache_key]
+    return None
+
+def cache_response(query: str, user_id: str, response_data: Dict[str, Any]):
+    """Cache response data"""
+    cache_key = get_cache_key(query, user_id)
+
+    # Remove oldest cache if at max size
+    if len(_query_cache) >= CACHE_MAX_SIZE:
+        oldest_key = min(_query_cache.keys(), key=lambda k: _query_cache[k][1])
+        del _query_cache[oldest_key]
+
+    _query_cache[cache_key] = (response_data, time.time())
 
 def initialize_models(model_name: str = "gpt-4o-mini"):
     """Initialize chat model and embeddings"""
@@ -58,8 +98,8 @@ def initialize_models(model_name: str = "gpt-4o-mini"):
     # Initialize chat model
     llm = init_chat_model(model_name, model_provider="openai")
     
-    # Initialize embeddings model - using text-embedding-3-large
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
+    # Initialize embeddings model - using text-embedding-3-small for faster performance
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     
     print("✅ Models initialized successfully")
 
@@ -100,17 +140,46 @@ def setup_pinecone_connections(csv_index_name: str = "csv-mental-health",
         print(f"⚠️ Could not connect to PDF index: {e}")
         pdf_vector_store = None
 
+async def parallel_retrieval(query: str) -> List[Document]:
+    """Perform parallel retrieval from both CSV and PDF stores"""
+    async def retrieve_csv():
+        try:
+            if csv_vector_store:
+                # In a thread pool since Pinecone operations are sync
+                loop = asyncio.get_event_loop()
+                return await loop.run_in_executor(None, csv_vector_store.similarity_search, query, 2)
+            return []
+        except Exception as e:
+            print(f"CSV retrieval error: {e}")
+            return []
+
+    async def retrieve_pdf():
+        try:
+            if pdf_vector_store:
+                # In a thread pool since Pinecone operations are sync
+                loop = asyncio.get_event_loop()
+                return await loop.run_in_executor(None, pdf_vector_store.similarity_search, query, 2)
+            return []
+        except Exception as e:
+            print(f"PDF retrieval error: {e}")
+            return []
+
+    # Run both retrievals in parallel
+    csv_docs, pdf_docs = await asyncio.gather(retrieve_csv(), retrieve_pdf())
+    return csv_docs + pdf_docs
+
 def create_retrieval_tools():
-    """Create retrieval tools for different data sources"""
-    
+    """Create optimized retrieval tools for different data sources"""
+
     @tool(response_format="content_and_artifact")
-    def retrieve_counseling_data(query: str):
+    async def retrieve_counseling_data(query: str):
         """Retrieve mental health counseling data from interview and synthetic datasets."""
         if not csv_vector_store:
             return "CSV vector store not available", []
-        
+
         try:
-            retrieved_docs = csv_vector_store.similarity_search(query, k=3)
+            # Reduced from k=3 to k=2 for faster retrieval
+            retrieved_docs = csv_vector_store.similarity_search(query, k=2)
             serialized = "\n\n".join(
                 (f"Source: {doc.metadata.get('source', 'Unknown')}\n"
                  f"Type: {doc.metadata.get('category', 'Unknown')}\n"
@@ -121,15 +190,16 @@ def create_retrieval_tools():
             return serialized, retrieved_docs
         except Exception as e:
             return f"Error retrieving counseling data: {e}", []
-    
+
     @tool(response_format="content_and_artifact")
-    def retrieve_research_data(query: str):
+    async def retrieve_research_data(query: str):
         """Retrieve academic research and clinical information from psychology textbooks and papers."""
         if not pdf_vector_store:
             return "PDF vector store not available", []
-        
+
         try:
-            retrieved_docs = pdf_vector_store.similarity_search(query, k=3)
+            # Reduced from k=3 to k=2 for faster retrieval
+            retrieved_docs = pdf_vector_store.similarity_search(query, k=2)
             serialized = "\n\n".join(
                 (f"Source: {doc.metadata.get('source', 'Unknown')}\n"
                  f"Category: {doc.metadata.get('category', 'Unknown')}\n"
@@ -140,71 +210,72 @@ def create_retrieval_tools():
             return serialized, retrieved_docs
         except Exception as e:
             return f"Error retrieving research data: {e}", []
-    
-    tools = [retrieve_counseling_data, retrieve_research_data]
-    print("✅ Retrieval tools setup complete")
+
+    # Create an optimized parallel retrieval tool
+    @tool(response_format="content_and_artifact")
+    async def retrieve_all_data_parallel(query: str):
+        """Retrieve data from both CSV and PDF sources in parallel for faster response."""
+        try:
+            retrieved_docs = await parallel_retrieval(query)
+            if not retrieved_docs:
+                return "No documents retrieved", []
+
+            serialized = "\n\n".join(
+                (f"Source: {doc.metadata.get('source', 'Unknown')}\n"
+                 f"Category: {doc.metadata.get('category', 'Unknown')}\n"
+                 f"Data Source: {doc.metadata.get('data_source', 'Unknown')}\n"
+                 f"Content: {doc.page_content}")
+                for doc in retrieved_docs
+            )
+            return serialized, retrieved_docs
+        except Exception as e:
+            return f"Error in parallel retrieval: {e}", []
+
+    tools = [retrieve_counseling_data, retrieve_research_data, retrieve_all_data_parallel]
+    print("✅ Optimized retrieval tools setup complete")
     return tools
 
 def get_mental_health_system_prompt() -> str:
     """Get the specialized mental health system prompt"""
-    return """You are a compassionate and knowledgeable mental health counseling assistant. Your role is to provide supportive, evidence-based guidance while maintaining professional boundaries.
+    return """You are a compassionate mental health support assistant. Provide short, helpful responses.
 
-**CORE PRINCIPLES:**
-- Approach each conversation with empathy, respect, and non-judgment
-- Provide helpful information based on evidence-based practices
-- Acknowledge the person's feelings and validate their experiences
-- Encourage professional help when appropriate
-- Maintain confidentiality and create a safe space
+**RESPONSE STYLE:**
+- Keep answers short and direct (2-3 sentences maximum)
+- Be supportive but concise
+- Focus on practical guidance
+- Avoid lengthy explanations
 
-**SAFETY PROTOCOL:**
-- If someone expresses suicidal thoughts or self-harm intentions, immediately provide crisis resources
-- Recognize your limitations as an AI and encourage professional support
-- Never diagnose or prescribe medication
-- Respect boundaries and cultural sensitivity
+**SAFETY RULES:**
+- Never give medical advice or medication recommendations
+- Never diagnose conditions
+- Always encourage professional help for medical concerns
+- For suicide/self-harm: immediate crisis response
 
 **RESPONSE GUIDELINES:**
-1. **Listen Actively**: Reflect back what you hear to show understanding
-2. **Validate Emotions**: Acknowledge that their feelings are legitimate
-3. **Provide Context**: Use retrieved mental health information to support your responses
-4. **Suggest Coping Strategies**: Offer practical, evidence-based techniques
-5. **Encourage Professional Help**: When appropriate, suggest consulting mental health professionals
-6. **Be Supportive**: Maintain hope and focus on strengths and resilience
+1. Acknowledge feelings briefly
+2. Offer 1-2 practical suggestions
+3. Suggest professional help when needed
+4. Keep responses under 100 words
 
-**CRISIS RESOURCES TO SHARE WHEN NEEDED:**
-- National Suicide Prevention Lifeline: 988 (US)
-- Crisis Text Line: Text HOME to 741741
-- International Association for Suicide Prevention: https://www.iasp.info/resources/Crisis_Centres/
-- Emergency Services: 911 (US) or local emergency number
-
-**CONVERSATION STYLE:**
-- Use warm, professional language
-- Ask open-ended questions to encourage reflection
-- Offer multiple perspectives when helpful
-- Be patient and allow processing time
-- Focus on collaboration rather than giving directives
-
-Remember: You are here to support, not replace professional mental health care. Every person's journey is unique, and you should tailor your responses to their individual needs and circumstances."""
+Remember: You provide support, not treatment. Always prioritize user safety."""
 
 def detect_crisis(message: str) -> bool:
     """Detect if a message contains crisis indicators"""
     message_lower = message.lower()
     return any(keyword in message_lower for keyword in CRISIS_KEYWORDS)
 
+def detect_medicine_question(message: str) -> bool:
+    """Detect if a message contains medicine/medication related questions"""
+    message_lower = message.lower()
+    return any(keyword in message_lower for keyword in MEDICINE_KEYWORDS)
+
+def get_medicine_response() -> str:
+    """Get response for medicine-related questions"""
+    return "I'm sorry, please consult a qualified healthcare professional for accurate guidance."
+
 def get_crisis_response() -> str:
     """Get immediate crisis response"""
-    return """🚨 **I'm concerned about your safety right now.** 🚨
-
-Your life has value, and there are people who want to help you through this difficult time.
-
-**IMMEDIATE RESOURCES:**
-• **National Suicide Prevention Lifeline: 988** (US) - Available 24/7
-• **Crisis Text Line: Text HOME to 741741** - Free, confidential support
-• **Emergency Services: 911** (US) or your local emergency number
-• **International Crisis Lines: https://www.iasp.info/resources/Crisis_Centres/**
-
-**You don't have to go through this alone.** Professional counselors are trained to help with exactly what you're experiencing.
-
-Would you like to talk about what's making you feel this way? I'm here to listen and support you."""
+    return "I'm really sorry you're feeling this way. Please reach out to someone you trust, and contact a mental health professional or your nearest emergency support right away."
 
 def setup_conversational_chain(tools):
     """Setup conversational RAG chain with user-specific memory"""
@@ -365,19 +436,27 @@ def detect_data_source_from_response(response_content: str) -> str:
 
 def get_response(message: str, user_id: str, use_agent: bool = False) -> Dict[str, Any]:
     """
-    Get response for API endpoint with user-specific memory
-    
+    Optimized get response function with caching and performance improvements
+
     Args:
         message: User's message
         user_id: Unique user identifier for conversation threading
         use_agent: Whether to use agent mode for complex queries
-        
+
     Returns:
         Dict with response data including data source information
     """
     try:
+        # Check cache first (except for agent mode which needs full context)
+        if not use_agent:
+            cached_response = get_cached_response(message, user_id)
+            if cached_response:
+                cached_response["timestamp"] = time.time()  # Update timestamp
+                cached_response["status_code"] = 200
+                return cached_response
+
         config = get_user_config(user_id)
-        
+
         response_data = {
             "user_id": user_id,
             "query": message,
@@ -388,12 +467,18 @@ def get_response(message: str, user_id: str, use_agent: bool = False) -> Dict[st
             "timestamp": time.time(),
             "status_code": 200
         }
-        
+
         # Check for crisis
         if detect_crisis(message):
             response_data["crisis_detected"] = True
             response_data["response"] = get_crisis_response()
             response_data["data_source"] = "none"  # Crisis response doesn't use data sources
+            return response_data
+
+        # Check for medicine questions
+        if detect_medicine_question(message):
+            response_data["response"] = get_medicine_response()
+            response_data["data_source"] = "none"  # Medicine response doesn't use data sources
             return response_data
         
         # Store all messages to analyze data sources
@@ -461,7 +546,11 @@ def get_response(message: str, user_id: str, use_agent: bool = False) -> Dict[st
         if not response_data["response"]:
             response_data["response"] = "I'm here to help, but I'm having trouble processing your message right now. Could you please try rephrasing your question?"
             response_data["data_source"] = "none"
-        
+
+        # Cache the response for future use (only for non-agent mode)
+        if not use_agent and response_data.get("status_code") == 200:
+            cache_response(message, user_id, response_data)
+
         return response_data
         
     except Exception as e:
