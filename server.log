@@ -1,0 +1,4 @@
+gunicorn app:app --bind 0.0.0.0:8000 --timeout 80000 --workers 3 --worker-class uvicorn.workers.UvicornWorker --daemon --access-logfile app.log --error-logfile app.log
+
+
+gunicorn app:app --bind 0.0.0.0:8000 --timeout 80000 --workers 3 --worker-class uvicorn.workers.UvicornWorker --access-logfile app.log --error-logfile app.log

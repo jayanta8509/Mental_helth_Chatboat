@@ -38,7 +38,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Global variables for models and stores
-llm = None
+# llm = None
 embeddings = None
 csv_vector_store = None
 pdf_vector_store = None
@@ -96,7 +96,7 @@ def initialize_models(model_name: str = "gpt-4o-mini"):
     global llm, embeddings
     
     # Initialize chat model
-    llm = init_chat_model(model_name, model_provider="openai")
+    llm = init_chat_model(model_name, model_provider="openai",max_tokens=500)
     
     # Initialize embeddings model - using text-embedding-3-small for faster performance
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
